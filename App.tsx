@@ -3,15 +3,28 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  FlatList,
+  ListRenderItemInfo,
   Pressable,
   ScrollView,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
 
-import { Bias, biases, categories, challenges } from './src/data/biases';
+import {
+  Bias,
+  LifeContext,
+  biases,
+  categories,
+  challenges,
+  getBiasById,
+  getBiasFeature,
+  getDailyBias,
+  lifeContexts,
+} from './src/data/biases';
 
 type Tab = 'Today' | 'Practice' | 'Journal' | 'Collection';
 
@@ -22,13 +35,14 @@ type JournalEntry = {
   createdAt: string;
 };
 
-const STORAGE_KEY = 'blindspot.journal.v1';
-const DAY_MS = 24 * 60 * 60 * 1000;
-const tabs: Tab[] = ['Today', 'Practice', 'Journal', 'Collection'];
+type ContextFilter = 'All' | LifeContext;
+type CollectionSection = {
+  title: string;
+  data: Bias[];
+};
 
-function getTodayBiasIndex() {
-  return Math.floor(Date.now() / DAY_MS) % biases.length;
-}
+const STORAGE_KEY = 'blindspot.journal.v1';
+const tabs: Tab[] = ['Today', 'Practice', 'Journal', 'Collection'];
 
 function formatEntryDate(value: string) {
   return new Intl.DateTimeFormat('en', {
@@ -39,12 +53,8 @@ function formatEntryDate(value: string) {
   }).format(new Date(value));
 }
 
-function getBiasById(id: string) {
-  return biases.find((bias) => bias.id === id) ?? biases[0];
-}
-
 export default function App() {
-  const todayBias = biases[getTodayBiasIndex()];
+  const todayBias = getDailyBias();
   const [activeTab, setActiveTab] = useState<Tab>('Today');
   const [focusBiasId, setFocusBiasId] = useState(todayBias.id);
   const [journalDraft, setJournalDraft] = useState('');
@@ -52,13 +62,15 @@ export default function App() {
   const [hasLoadedEntries, setHasLoadedEntries] = useState(false);
   const [challengeIndex, setChallengeIndex] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
+  const [collectionQuery, setCollectionQuery] = useState('');
+  const [contextFilter, setContextFilter] = useState<ContextFilter>('All');
 
   const focusBias = getBiasById(focusBiasId);
   const challenge = challenges[challengeIndex];
   const trimmedDraft = journalDraft.trim();
 
-  const unlockedBiasIds = useMemo(() => {
-    const ids = new Set<string>([todayBias.id, ...biases.slice(0, 3).map((bias) => bias.id)]);
+  const seenBiasIds = useMemo(() => {
+    const ids = new Set<string>([todayBias.id]);
     entries.forEach((entry) => ids.add(entry.biasId));
     return ids;
   }, [entries, todayBias.id]);
@@ -135,7 +147,9 @@ export default function App() {
       return (
         <TodayScreen
           bias={focusBias}
+          entryCount={entries.length}
           isToday={focusBias.id === todayBias.id}
+          seenCount={seenBiasIds.size}
           draft={journalDraft}
           onDraftChange={setJournalDraft}
           onSave={saveEntry}
@@ -148,6 +162,7 @@ export default function App() {
       return (
         <PracticeScreen
           challenge={challenge}
+          challengeIndex={challengeIndex}
           selectedAnswer={selectedAnswer}
           onSelectAnswer={setSelectedAnswer}
           onNextChallenge={moveToNextChallenge}
@@ -167,13 +182,27 @@ export default function App() {
 
     return (
       <CollectionScreen
+        contextFilter={contextFilter}
         entryCountByBias={entryCountByBias}
-        unlockedBiasIds={unlockedBiasIds}
+        query={collectionQuery}
+        seenBiasIds={seenBiasIds}
+        onContextFilterChange={setContextFilter}
         onFocusBias={(biasId) => {
           setFocusBiasId(biasId);
           setActiveTab('Today');
         }}
+        onQueryChange={setCollectionQuery}
       />
+    );
+  }
+
+  if (activeTab === 'Collection') {
+    return (
+      <View style={styles.app}>
+        <StatusBar style="dark" />
+        {renderContent()}
+        <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
+      </View>
     );
   }
 
@@ -184,80 +213,123 @@ export default function App() {
         contentContainerStyle={styles.scrollContent}
         contentInsetAdjustmentBehavior="automatic"
       >
-        <View style={styles.header}>
-          <View style={styles.brandRow}>
-            <View style={styles.blindspotMark}>
-              <View style={styles.blindspotCore} />
-            </View>
-            <Text style={styles.brand}>Blindspot</Text>
-          </View>
-          <Text style={styles.headerText}>
-            A daily mirror for the thoughts that move faster than you notice.
-          </Text>
-        </View>
+        <AppHeader />
 
         {renderContent()}
       </ScrollView>
 
-      <View style={styles.tabBar}>
-        {tabs.map((tab) => {
-          const isActive = activeTab === tab;
+      <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
+    </View>
+  );
+}
 
-          return (
-            <Pressable
-              key={tab}
-              accessibilityRole="button"
-              accessibilityState={{ selected: isActive }}
-              onPress={() => setActiveTab(tab)}
-              style={({ pressed }) => [
-                styles.tabButton,
-                isActive ? styles.tabButtonActive : styles.tabButtonInactive,
-                pressed ? styles.pressed : null,
-              ]}
-            >
-              <Text style={isActive ? styles.tabTextActive : styles.tabTextInactive}>{tab}</Text>
-            </Pressable>
-          );
-        })}
+function AppHeader() {
+  return (
+    <View style={styles.header}>
+      <View style={styles.brandRow}>
+        <View style={styles.blindspotMark}>
+          <View style={styles.blindspotCore} />
+        </View>
+        <Text style={styles.brand}>Blindspot</Text>
       </View>
+      <Text style={styles.headerText}>
+        A daily mirror for the thoughts that move faster than you notice.
+      </Text>
+    </View>
+  );
+}
+
+function TabBar({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: Tab;
+  onTabChange: (tab: Tab) => void;
+}) {
+  return (
+    <View style={styles.tabBar}>
+      {tabs.map((tab) => {
+        const isActive = activeTab === tab;
+
+        return (
+          <Pressable
+            key={tab}
+            accessibilityRole="button"
+            accessibilityState={{ selected: isActive }}
+            onPress={() => onTabChange(tab)}
+            style={({ pressed }) => [
+              styles.tabButton,
+              isActive ? styles.tabButtonActive : styles.tabButtonInactive,
+              pressed ? styles.pressed : null,
+            ]}
+          >
+            <Text style={isActive ? styles.tabTextActive : styles.tabTextInactive}>{tab}</Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
 
 function TodayScreen({
   bias,
+  entryCount,
   isToday,
+  seenCount,
   draft,
   onDraftChange,
   onSave,
   canSave,
 }: {
   bias: Bias;
+  entryCount: number;
   isToday: boolean;
+  seenCount: number;
   draft: string;
   onDraftChange: (value: string) => void;
   onSave: () => void;
   canSave: boolean;
 }) {
+  const feature = getBiasFeature(bias);
+
   return (
     <View style={styles.screenStack}>
       <View style={styles.sectionLabelRow}>
         <Text style={styles.kicker}>{isToday ? "Today's bias" : 'Selected bias'}</Text>
-        <Text style={styles.contextLabel}>{bias.category}</Text>
+        <Text style={styles.contextLabel}>#{bias.order} / {biases.length}</Text>
+      </View>
+
+      <View style={styles.metricsRow}>
+        <View style={styles.metricCard}>
+          <Text style={styles.metricValue}>{seenCount}</Text>
+          <Text style={styles.metricLabel}>noticed</Text>
+        </View>
+        <View style={styles.metricCard}>
+          <Text style={styles.metricValue}>{entryCount}</Text>
+          <Text style={styles.metricLabel}>journaled</Text>
+        </View>
+        <View style={styles.metricCard}>
+          <Text style={styles.metricValue}>{biases.length}</Text>
+          <Text style={styles.metricLabel}>biases</Text>
+        </View>
       </View>
 
       <View style={styles.biasCard}>
+        <View style={styles.biasMetaRow}>
+          <Text style={styles.biasMeta}>{bias.lifeContext}</Text>
+          <Text style={styles.biasMeta}>{bias.category}</Text>
+        </View>
         <Text style={styles.biasTitle}>{bias.name}</Text>
-        <Text style={styles.biasStory}>{bias.story}</Text>
+        <Text style={styles.biasStory}>{feature.story}</Text>
         <View style={styles.definitionBox}>
           <Text style={styles.definitionLabel}>What is happening</Text>
-          <Text style={styles.definitionText}>{bias.shortDefinition}</Text>
+          <Text style={styles.definitionText}>{bias.definition}</Text>
         </View>
       </View>
 
       <View style={styles.reflectionCard}>
         <Text style={styles.cardLabel}>Reflection</Text>
-        <Text style={styles.reflectionQuestion}>{bias.reflection}</Text>
+        <Text style={styles.reflectionQuestion}>{feature.reflection}</Text>
         <TextInput
           multiline
           onChangeText={onDraftChange}
@@ -283,7 +355,7 @@ function TodayScreen({
 
       <View style={styles.tellCard}>
         <Text style={styles.cardLabel}>Everyday tell</Text>
-        <Text style={styles.tellText}>{bias.everydayTell}</Text>
+        <Text style={styles.tellText}>{feature.everydayTell}</Text>
       </View>
     </View>
   );
@@ -291,11 +363,13 @@ function TodayScreen({
 
 function PracticeScreen({
   challenge,
+  challengeIndex,
   selectedAnswer,
   onSelectAnswer,
   onNextChallenge,
 }: {
   challenge: (typeof challenges)[number];
+  challengeIndex: number;
   selectedAnswer: number | null;
   onSelectAnswer: (answerIndex: number) => void;
   onNextChallenge: () => void;
@@ -307,7 +381,9 @@ function PracticeScreen({
     <View style={styles.screenStack}>
       <View style={styles.sectionLabelRow}>
         <Text style={styles.kicker}>Spot the bias</Text>
-        <Text style={styles.contextLabel}>30 second practice</Text>
+        <Text style={styles.contextLabel}>
+          {challengeIndex + 1} / {challenges.length}
+        </Text>
       </View>
 
       <View style={styles.practiceCard}>
@@ -413,61 +489,140 @@ function JournalScreen({
 }
 
 function CollectionScreen({
+  contextFilter,
   entryCountByBias,
-  unlockedBiasIds,
+  query,
+  seenBiasIds,
+  onContextFilterChange,
   onFocusBias,
+  onQueryChange,
 }: {
+  contextFilter: ContextFilter;
   entryCountByBias: Map<string, number>;
-  unlockedBiasIds: Set<string>;
+  query: string;
+  seenBiasIds: Set<string>;
+  onContextFilterChange: (context: ContextFilter) => void;
   onFocusBias: (biasId: string) => void;
+  onQueryChange: (value: string) => void;
 }) {
-  return (
-    <View style={styles.screenStack}>
-      <View style={styles.sectionLabelRow}>
-        <Text style={styles.kicker}>Collection</Text>
-        <Text style={styles.contextLabel}>{unlockedBiasIds.size} unlocked</Text>
-      </View>
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredBiases = biases.filter((bias) => {
+    const matchesContext = contextFilter === 'All' || bias.lifeContext === contextFilter;
+    const matchesQuery =
+      normalizedQuery.length === 0 ||
+      bias.name.toLowerCase().includes(normalizedQuery) ||
+      bias.definition.toLowerCase().includes(normalizedQuery) ||
+      bias.category.toLowerCase().includes(normalizedQuery) ||
+      bias.lifeContext.toLowerCase().includes(normalizedQuery);
 
-      {categories.map((category) => {
-        const categoryBiases = biases.filter((bias) => bias.category === category);
+    return matchesContext && matchesQuery;
+  });
+  const sections: CollectionSection[] = categories
+    .map((category) => ({
+      title: category,
+      data: filteredBiases.filter((bias) => bias.category === category),
+    }))
+    .filter((section) => section.data.length > 0);
 
-        return (
-          <View key={category} style={styles.collectionGroup}>
-            <Text style={styles.collectionTitle}>{category}</Text>
-            {categoryBiases.map((bias) => {
-              const isUnlocked = unlockedBiasIds.has(bias.id);
-              const entryCount = entryCountByBias.get(bias.id) ?? 0;
+  function renderBiasItem({ item }: ListRenderItemInfo<Bias>) {
+    const entryCount = entryCountByBias.get(item.id) ?? 0;
+    const hasSeen = seenBiasIds.has(item.id);
 
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={!isUnlocked}
-                  key={bias.id}
-                  onPress={() => onFocusBias(bias.id)}
-                  style={({ pressed }) => [
-                    styles.collectionItem,
-                    !isUnlocked ? styles.collectionItemLocked : null,
-                    pressed && isUnlocked ? styles.pressed : null,
-                  ]}
-                >
-                  <View style={styles.collectionCopy}>
-                    <Text style={isUnlocked ? styles.collectionName : styles.collectionNameLocked}>
-                      {bias.name}
-                    </Text>
-                    <Text style={styles.collectionMeta}>
-                      {isUnlocked ? `${entryCount} journal entries` : 'Unlock through daily practice'}
-                    </Text>
-                  </View>
-                  <Text style={isUnlocked ? styles.collectionAction : styles.collectionActionLocked}>
-                    {isUnlocked ? 'Review' : 'Locked'}
-                  </Text>
-                </Pressable>
-              );
-            })}
+    return (
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => onFocusBias(item.id)}
+        style={({ pressed }) => [styles.collectionItem, pressed ? styles.pressed : null]}
+      >
+        <View style={styles.collectionCopy}>
+          <View style={styles.collectionNameRow}>
+            <Text style={styles.collectionName}>{item.name}</Text>
+            <Text style={hasSeen ? styles.collectionSeen : styles.collectionUnseen}>
+              {hasSeen ? 'Seen' : 'New'}
+            </Text>
           </View>
-        );
-      })}
-    </View>
+          <Text style={styles.collectionDefinition}>{item.definition}</Text>
+          <Text style={styles.collectionMeta}>
+            {item.lifeContext} - {entryCount} journal entries
+          </Text>
+        </View>
+      </Pressable>
+    );
+  }
+
+  function renderSectionHeader({ section }: { section: CollectionSection }) {
+    return (
+      <View style={styles.collectionSectionHeader}>
+        <Text style={styles.collectionTitle}>{section.title}</Text>
+        <Text style={styles.collectionCount}>{section.data.length}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <SectionList
+      contentContainerStyle={styles.collectionContent}
+      keyboardShouldPersistTaps="handled"
+      ListEmptyComponent={
+        <View style={styles.emptyCard}>
+          <Text style={styles.emptyTitle}>No matching biases</Text>
+          <Text style={styles.emptyText}>
+            Try a broader search term or switch the context filter back to All.
+          </Text>
+        </View>
+      }
+      ListHeaderComponent={
+        <View style={styles.collectionHeaderStack}>
+          <AppHeader />
+          <View style={styles.sectionLabelRow}>
+            <Text style={styles.kicker}>Collection</Text>
+            <Text style={styles.contextLabel}>
+              {filteredBiases.length} / {biases.length}
+            </Text>
+          </View>
+          <View style={styles.collectionSearchCard}>
+            <TextInput
+              onChangeText={onQueryChange}
+              placeholder="Search biases, definitions, or contexts"
+              placeholderTextColor="#8D8B82"
+              style={styles.searchInput}
+              value={query}
+            />
+            <FlatList
+              data={['All' as ContextFilter, ...lifeContexts]}
+              horizontal
+              keyExtractor={(item) => item}
+              renderItem={({ item }) => {
+                const isActive = contextFilter === item;
+
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isActive }}
+                    onPress={() => onContextFilterChange(item)}
+                    style={({ pressed }) => [
+                      styles.filterChip,
+                      isActive ? styles.filterChipActive : null,
+                      pressed ? styles.pressed : null,
+                    ]}
+                  >
+                    <Text style={isActive ? styles.filterChipTextActive : styles.filterChipText}>
+                      {item}
+                    </Text>
+                  </Pressable>
+                );
+              }}
+              showsHorizontalScrollIndicator={false}
+              style={styles.filterList}
+            />
+          </View>
+        </View>
+      }
+      renderItem={renderBiasItem}
+      renderSectionHeader={renderSectionHeader}
+      sections={sections}
+      stickySectionHeadersEnabled={false}
+    />
   );
 }
 
@@ -541,6 +696,31 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'right',
   },
+  metricsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  metricCard: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E4DED0',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    gap: 4,
+    padding: 13,
+  },
+  metricValue: {
+    color: '#25231D',
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  metricLabel: {
+    color: '#777368',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
   biasCard: {
     backgroundColor: '#FFFDF7',
     borderColor: '#E1D9C7',
@@ -549,6 +729,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 18,
     padding: 20,
+  },
+  biasMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  biasMeta: {
+    backgroundColor: '#F0EDE5',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    color: '#5F5C52',
+    fontSize: 12,
+    fontWeight: '800',
+    overflow: 'hidden',
+    paddingHorizontal: 9,
+    paddingVertical: 6,
   },
   biasTitle: {
     color: '#25231D',
@@ -765,12 +961,81 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 24,
   },
+  collectionContent: {
+    gap: 14,
+    paddingBottom: 108,
+    paddingHorizontal: 20,
+    paddingTop: 68,
+  },
+  collectionHeaderStack: {
+    gap: 18,
+  },
+  collectionSearchCard: {
+    backgroundColor: '#FFFDF7',
+    borderColor: '#E1D9C7',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 12,
+    padding: 14,
+  },
+  searchInput: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#D8CFBC',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    borderWidth: 1,
+    color: '#25231D',
+    fontSize: 16,
+    minHeight: 46,
+    paddingHorizontal: 13,
+  },
+  filterList: {
+    marginHorizontal: -2,
+  },
+  filterChip: {
+    backgroundColor: '#F0EDE5',
+    borderColor: '#DDD4C3',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginHorizontal: 2,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  filterChipActive: {
+    backgroundColor: '#25231D',
+    borderColor: '#25231D',
+  },
+  filterChipText: {
+    color: '#5F5C52',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  filterChipTextActive: {
+    color: '#FFFDF7',
+    fontSize: 13,
+    fontWeight: '900',
+  },
   collectionGroup: {
     gap: 10,
+  },
+  collectionSectionHeader: {
+    alignItems: 'center',
+    backgroundColor: '#F7F4EC',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingBottom: 2,
+    paddingTop: 8,
   },
   collectionTitle: {
     color: '#25231D',
     fontSize: 18,
+    fontWeight: '800',
+  },
+  collectionCount: {
+    color: '#777368',
+    fontSize: 13,
     fontWeight: '800',
   },
   collectionItem: {
@@ -792,10 +1057,46 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 4,
   },
+  collectionNameRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+  },
   collectionName: {
     color: '#25231D',
+    flex: 1,
     fontSize: 16,
     fontWeight: '800',
+  },
+  collectionSeen: {
+    backgroundColor: '#E1F1E3',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    color: '#246B65',
+    fontSize: 11,
+    fontWeight: '900',
+    overflow: 'hidden',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    textTransform: 'uppercase',
+  },
+  collectionUnseen: {
+    backgroundColor: '#F0EDE5',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    color: '#777368',
+    fontSize: 11,
+    fontWeight: '900',
+    overflow: 'hidden',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    textTransform: 'uppercase',
+  },
+  collectionDefinition: {
+    color: '#34312A',
+    fontSize: 15,
+    lineHeight: 22,
   },
   collectionNameLocked: {
     color: '#8D8B82',
