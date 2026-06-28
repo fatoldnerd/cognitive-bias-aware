@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -16,7 +15,6 @@ import {
 
 import {
   Bias,
-  LifeContext,
   biases,
   categories,
   challenges,
@@ -25,23 +23,14 @@ import {
   getDailyBias,
   lifeContexts,
 } from './src/data/biases';
+import { loadJournalEntries, saveJournalEntries } from './src/storage/journal';
+import { ContextFilter, JournalEntry, Tab } from './src/types';
 
-type Tab = 'Today' | 'Practice' | 'Journal' | 'Collection';
-
-type JournalEntry = {
-  id: string;
-  biasId: string;
-  text: string;
-  createdAt: string;
-};
-
-type ContextFilter = 'All' | LifeContext;
 type CollectionSection = {
   title: string;
   data: Bias[];
 };
 
-const STORAGE_KEY = 'blindspot.journal.v1';
 const tabs: Tab[] = ['Today', 'Practice', 'Journal', 'Collection'];
 
 function formatEntryDate(value: string) {
@@ -59,6 +48,7 @@ export default function App() {
   const [focusBiasId, setFocusBiasId] = useState(todayBias.id);
   const [journalDraft, setJournalDraft] = useState('');
   const [entries, setEntries] = useState<JournalEntry[]>([]);
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [hasLoadedEntries, setHasLoadedEntries] = useState(false);
   const [challengeIndex, setChallengeIndex] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
@@ -88,16 +78,10 @@ export default function App() {
 
     async function loadEntries() {
       try {
-        const storedEntries = await AsyncStorage.getItem(STORAGE_KEY);
+        const savedEntries = await loadJournalEntries();
 
-        if (storedEntries === null) {
-          return;
-        }
-
-        const parsedEntries = JSON.parse(storedEntries) as JournalEntry[];
-
-        if (isMounted && Array.isArray(parsedEntries)) {
-          setEntries(parsedEntries);
+        if (isMounted) {
+          setEntries(savedEntries);
         }
       } catch {
         if (isMounted) {
@@ -123,6 +107,26 @@ export default function App() {
       return;
     }
 
+    if (editingEntryId) {
+      const nextEntries = entries.map((entry) =>
+        entry.id === editingEntryId
+          ? {
+              ...entry,
+              biasId: focusBias.id,
+              text: trimmedDraft,
+              updatedAt: new Date().toISOString(),
+            }
+          : entry,
+      );
+
+      setEntries(nextEntries);
+      setEditingEntryId(null);
+      setJournalDraft('');
+      await saveJournalEntries(nextEntries);
+      setActiveTab('Journal');
+      return;
+    }
+
     const nextEntry: JournalEntry = {
       id: `${Date.now()}`,
       biasId: focusBias.id,
@@ -133,8 +137,32 @@ export default function App() {
     const nextEntries = [nextEntry, ...entries];
     setEntries(nextEntries);
     setJournalDraft('');
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextEntries));
+    await saveJournalEntries(nextEntries);
     setActiveTab('Journal');
+  }
+
+  async function deleteEntry(entryId: string) {
+    const nextEntries = entries.filter((entry) => entry.id !== entryId);
+    setEntries(nextEntries);
+
+    if (editingEntryId === entryId) {
+      setEditingEntryId(null);
+      setJournalDraft('');
+    }
+
+    await saveJournalEntries(nextEntries);
+  }
+
+  function startEditingEntry(entry: JournalEntry) {
+    setFocusBiasId(entry.biasId);
+    setJournalDraft(entry.text);
+    setEditingEntryId(entry.id);
+    setActiveTab('Today');
+  }
+
+  function cancelEditingEntry() {
+    setEditingEntryId(null);
+    setJournalDraft('');
   }
 
   function moveToNextChallenge() {
@@ -148,9 +176,11 @@ export default function App() {
         <TodayScreen
           bias={focusBias}
           entryCount={entries.length}
+          isEditing={editingEntryId !== null}
           isToday={focusBias.id === todayBias.id}
           seenCount={seenBiasIds.size}
           draft={journalDraft}
+          onCancelEdit={cancelEditingEntry}
           onDraftChange={setJournalDraft}
           onSave={saveEntry}
           canSave={trimmedDraft.length > 0}
@@ -175,6 +205,8 @@ export default function App() {
         <JournalScreen
           entries={entries}
           hasLoadedEntries={hasLoadedEntries}
+          onDeleteEntry={deleteEntry}
+          onEditEntry={startEditingEntry}
           onNewEntry={() => setActiveTab('Today')}
         />
       );
@@ -274,18 +306,22 @@ function TabBar({
 function TodayScreen({
   bias,
   entryCount,
+  isEditing,
   isToday,
   seenCount,
   draft,
+  onCancelEdit,
   onDraftChange,
   onSave,
   canSave,
 }: {
   bias: Bias;
   entryCount: number;
+  isEditing: boolean;
   isToday: boolean;
   seenCount: number;
   draft: string;
+  onCancelEdit: () => void;
   onDraftChange: (value: string) => void;
   onSave: () => void;
   canSave: boolean;
@@ -328,7 +364,18 @@ function TodayScreen({
       </View>
 
       <View style={styles.reflectionCard}>
-        <Text style={styles.cardLabel}>Reflection</Text>
+        <View style={styles.reflectionHeader}>
+          <Text style={styles.cardLabel}>{isEditing ? 'Edit entry' : 'Reflection'}</Text>
+          {isEditing ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={onCancelEdit}
+              style={({ pressed }) => [styles.inlineButton, pressed ? styles.pressed : null]}
+            >
+              <Text style={styles.inlineButtonText}>Cancel</Text>
+            </Pressable>
+          ) : null}
+        </View>
         <Text style={styles.reflectionQuestion}>{feature.reflection}</Text>
         <TextInput
           multiline
@@ -349,7 +396,9 @@ function TodayScreen({
             pressed && canSave ? styles.pressed : null,
           ]}
         >
-          <Text style={styles.primaryButtonText}>Save journal entry</Text>
+          <Text style={styles.primaryButtonText}>
+            {isEditing ? 'Save changes' : 'Save journal entry'}
+          </Text>
         </Pressable>
       </View>
 
@@ -435,12 +484,23 @@ function PracticeScreen({
 function JournalScreen({
   entries,
   hasLoadedEntries,
+  onDeleteEntry,
+  onEditEntry,
   onNewEntry,
 }: {
   entries: JournalEntry[];
   hasLoadedEntries: boolean;
+  onDeleteEntry: (entryId: string) => void;
+  onEditEntry: (entry: JournalEntry) => void;
   onNewEntry: () => void;
 }) {
+  function confirmDeleteEntry(entryId: string) {
+    Alert.alert('Delete entry?', 'This removes the journal entry from this device.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => onDeleteEntry(entryId) },
+    ]);
+  }
+
   return (
     <View style={styles.screenStack}>
       <View style={styles.sectionLabelRow}>
@@ -481,6 +541,26 @@ function JournalScreen({
               <Text style={styles.entryDate}>{formatEntryDate(entry.createdAt)}</Text>
             </View>
             <Text style={styles.entryText}>{entry.text}</Text>
+            <View style={styles.entryActions}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => onEditEntry(entry)}
+                style={({ pressed }) => [styles.entryActionButton, pressed ? styles.pressed : null]}
+              >
+                <Text style={styles.entryActionText}>Edit</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => confirmDeleteEntry(entry.id)}
+                style={({ pressed }) => [
+                  styles.entryActionButton,
+                  styles.entryDeleteButton,
+                  pressed ? styles.pressed : null,
+                ]}
+              >
+                <Text style={styles.entryDeleteText}>Delete</Text>
+              </Pressable>
+            </View>
           </View>
         );
       })}
@@ -795,6 +875,24 @@ const styles = StyleSheet.create({
     letterSpacing: 0,
     textTransform: 'uppercase',
   },
+  reflectionHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  inlineButton: {
+    backgroundColor: '#F0EDE5',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  inlineButtonText: {
+    color: '#5F5C52',
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
   reflectionQuestion: {
     color: '#25231D',
     fontSize: 20,
@@ -960,6 +1058,35 @@ const styles = StyleSheet.create({
     color: '#34312A',
     fontSize: 16,
     lineHeight: 24,
+  },
+  entryActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  entryActionButton: {
+    backgroundColor: '#EDF4F6',
+    borderColor: '#C5D7DD',
+    borderCurve: 'continuous',
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  entryDeleteButton: {
+    backgroundColor: '#F7E8E3',
+    borderColor: '#C98972',
+  },
+  entryActionText: {
+    color: '#195D66',
+    fontSize: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  entryDeleteText: {
+    color: '#8F3E2C',
+    fontSize: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
   },
   collectionContent: {
     gap: 14,
